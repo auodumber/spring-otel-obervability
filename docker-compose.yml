@@ -1,0 +1,163 @@
+# docker-compose.yml
+# ============================================================================
+#  Full observability stack for local development and CI
+#
+#  Services:
+#    order-service    — Spring Boot 4 application (port 8080)
+#    otel-collector   — OTel Collector: OTLP receiver + fan-out (4317/4318)
+#    prometheus       — Metrics backend (9090)
+#    tempo            — Distributed traces backend (3200)
+#    loki             — Log aggregation backend (3100)
+#    grafana          — Unified UI for all three signals (3000)
+#
+#  Quickstart:
+#    docker compose up -d
+#    curl -s http://localhost:8080/actuator/health | jq .
+#    open http://localhost:3000   (admin / admin)
+# ============================================================================
+
+services:
+
+  # --------------------------------------------------------------------------
+  #  Application
+  # --------------------------------------------------------------------------
+  order-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: order-service
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_PROFILES_ACTIVE:   local
+      APP_ENV:                  local
+      APP_VERSION:              1.0.0
+      APP_REGION:               ap-south-1
+      # Point all three OTLP exporters at the collector
+      OTEL_METRICS_URL:         http://otel-collector:4318/v1/metrics
+      OTEL_TRACES_URL:          http://otel-collector:4318/v1/traces
+      OTEL_LOGS_URL:            http://otel-collector:4318/v1/logs
+      TRACING_SAMPLE_RATE:      "1.0"
+      JAVA_OPTS:                "-Xms256m -Xmx512m"
+    depends_on:
+      - otel-collector
+    #    healthcheck:
+    #      test: ["CMD-SHELL", "curl -sf http://localhost:8080/actuator/health | grep -q UP"]
+    #      interval: 15s
+    #      timeout: 5s
+    #      retries: 5
+    #      start_period: 30s
+    networks:
+      - observability
+
+  # --------------------------------------------------------------------------
+  #  OpenTelemetry Collector
+  # --------------------------------------------------------------------------
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.120.0-amd64
+    container_name: otel-collector
+    command: ["--config=/etc/otel/config.yml"]
+    volumes:
+      - ./otel-collector-config.yml:/etc/otel/config.yml:ro
+    ports:
+      - "4317:4317"    # OTLP gRPC
+      - "4318:4318"    # OTLP HTTP
+      - "8888:8888"    # Collector self-metrics
+      - "9464:9464"    # Prometheus exporter (scraped by Prometheus)
+    depends_on:
+      - tempo
+      - loki
+    networks:
+      - observability
+
+  # --------------------------------------------------------------------------
+  #  Prometheus
+  # --------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v3.2.1
+    container_name: prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=7d"
+      - "--web.enable-lifecycle"          # reload config via POST /-/reload
+      - "--web.enable-remote-write-receiver"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - observability
+
+  # --------------------------------------------------------------------------
+  #  Grafana Tempo (Distributed Tracing)
+  # --------------------------------------------------------------------------
+  tempo:
+    image: grafana/tempo:2.7.2
+    container_name: tempo
+    command: ["-config.file=/etc/tempo/tempo.yml"]
+    volumes:
+      - ./tempo.yml:/etc/tempo/tempo.yml:ro
+      - tempo_data:/var/tempo
+    ports:
+      - "3200:3200"    # Tempo HTTP API (queried by Grafana)
+      # Note: 4317/4318 are exposed internally but not on the host
+      #       (the app sends to otel-collector which forwards here)
+    networks:
+      - observability
+
+  # --------------------------------------------------------------------------
+  #  Grafana Loki (Log Aggregation)
+  # --------------------------------------------------------------------------
+  loki:
+    image: grafana/loki:3.4.2
+    container_name: loki
+    command: ["-config.file=/etc/loki/loki-config.yml"]
+    volumes:
+      - ./loki-config.yml:/etc/loki/loki-config.yml:ro
+      - loki_data:/loki
+    ports:
+      - "3100:3100"
+    networks:
+      - observability
+
+  # --------------------------------------------------------------------------
+  #  Grafana (Unified Observability UI)
+  # --------------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:11.5.2
+    container_name: grafana
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED:    "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE:   Admin
+      GF_AUTH_DISABLE_LOGIN_FORM:   "false"
+      GF_FEATURE_TOGGLES_ENABLE:    traceqlEditor traceToMetrics correlations
+      GF_SERVER_ROOT_URL:           http://localhost:3000
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+      - tempo
+      - loki
+    networks:
+      - observability
+
+# ============================================================================
+#  Persistent volumes
+# ============================================================================
+volumes:
+  prometheus_data:
+  tempo_data:
+  loki_data:
+  grafana_data:
+
+# ============================================================================
+#  Network
+# ============================================================================
+networks:
+  observability:
+    driver: bridge

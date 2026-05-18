@@ -1,0 +1,241 @@
+# ============================================================================
+#  OpenTelemetry Collector — Central telemetry hub
+#
+#  Receives:
+#    • OTLP/gRPC  (4317)
+#    • OTLP/HTTP  (4318)
+#
+#  Processes:
+#    • Memory limiting
+#    • Batching
+#    • Resource enrichment
+#    • Health-check span filtering
+#
+#  Exports:
+#    • Prometheus (metrics endpoint on 9464)
+#    • Grafana Tempo (traces via OTLP/gRPC)
+#    • Grafana Loki  (logs)
+#
+#  Purpose:
+#    Centralized telemetry pipeline for metrics, traces, and logs.
+# ============================================================================
+
+receivers:
+
+  # --------------------------------------------------------------------------
+  # OTLP Receiver
+  #
+  # Accepts telemetry from:
+  #   • Spring Boot Micrometer OTel
+  #   • OpenTelemetry SDKs
+  #   • OTel Java Agent
+  #
+  # Ports:
+  #   • 4317 → gRPC
+  #   • 4318 → HTTP
+  # --------------------------------------------------------------------------
+  otlp:
+    protocols:
+
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+      http:
+        endpoint: 0.0.0.0:4318
+
+
+processors:
+
+  # --------------------------------------------------------------------------
+  # Batch Processor
+  #
+  # Buffers telemetry before exporting.
+  #
+  # Benefits:
+  #   • Reduces network overhead
+  #   • Improves exporter throughput
+  #   • Reduces CPU usage
+  # --------------------------------------------------------------------------
+  batch:
+    timeout: 5s
+    send_batch_size: 512
+    send_batch_max_size: 1024
+
+
+  # --------------------------------------------------------------------------
+  # Memory Limiter
+  #
+  # Prevents collector OOM crashes by dropping telemetry when memory usage
+  # exceeds configured thresholds.
+  # --------------------------------------------------------------------------
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+
+
+  # --------------------------------------------------------------------------
+  # Resource Processor
+  #
+  # Adds or overrides resource attributes on all telemetry signals.
+  #
+  # Resource attributes help identify:
+  #   • services
+  #   • environments
+  #   • infrastructure
+  # --------------------------------------------------------------------------
+  resource:
+    attributes:
+
+      - key: collector.name
+        value: otel-collector
+        action: insert
+
+
+  # --------------------------------------------------------------------------
+  # Filter Processor
+  #
+  # Removes noisy actuator traces from telemetry pipeline.
+  #
+  # Prevents:
+  #   • trace spam
+  #   • unnecessary storage usage
+  #   • noisy Grafana dashboards
+  # --------------------------------------------------------------------------
+  filter/drop_health:
+    error_mode: ignore
+
+    traces:
+      span:
+        - 'attributes["http.route"] == "/actuator/health"'
+        - 'attributes["http.route"] == "/actuator/prometheus"'
+
+
+exporters:
+
+  # --------------------------------------------------------------------------
+  # Prometheus Exporter
+  #
+  # Exposes metrics endpoint for Prometheus scraping.
+  #
+  # Prometheus scrapes:
+  #   http://otel-collector:9464/metrics
+  # --------------------------------------------------------------------------
+  prometheus:
+    endpoint: "0.0.0.0:9464"
+
+    enable_open_metrics: true
+
+    resource_to_telemetry_conversion:
+      enabled: true
+
+
+  # --------------------------------------------------------------------------
+  # Tempo Exporter
+  #
+  # Sends traces to Grafana Tempo using OTLP/gRPC.
+  # --------------------------------------------------------------------------
+  otlp/tempo:
+    endpoint: tempo:4317
+
+    tls:
+      insecure: true
+
+
+  # --------------------------------------------------------------------------
+  # Loki Exporter
+  #
+  # Sends structured logs to Grafana Loki.
+  #
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp
+
+
+  # --------------------------------------------------------------------------
+  # Debug Exporter
+  #
+  # Prints telemetry to collector logs.
+  #
+  # Useful for:
+  #   • debugging pipelines
+  #   • verifying telemetry flow
+  #
+  # Disable in production environments.
+  # --------------------------------------------------------------------------
+  debug:
+    verbosity: detailed
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+
+  pipelines:
+
+    # ------------------------------------------------------------------------
+    # Metrics Pipeline
+    #
+    # Flow:
+    #   Application → OTLP Receiver → Processors → Prometheus Exporter
+    # ------------------------------------------------------------------------
+    metrics:
+      receivers:  [otlp]
+
+      processors:
+        - memory_limiter
+        - batch
+        - resource
+
+      exporters:
+        - prometheus
+
+
+    # ------------------------------------------------------------------------
+    # Traces Pipeline
+    #
+    # Flow:
+    #   Application → OTLP Receiver → Filter → Tempo
+    # ------------------------------------------------------------------------
+    traces:
+      receivers:  [otlp]
+
+      processors:
+        - memory_limiter
+        - filter/drop_health
+        - batch
+        - resource
+
+      exporters:
+        - otlp/tempo
+
+
+    # ------------------------------------------------------------------------
+    # Logs Pipeline
+    #
+    # Flow:
+    #   Application → OTLP Receiver → Loki
+    # ------------------------------------------------------------------------
+    logs:
+      receivers:  [otlp]
+
+      processors:
+        - memory_limiter
+        - batch
+        - resource
+
+      exporters:
+        - debug
+        - otlphttp/loki
+
+
+  # --------------------------------------------------------------------------
+  # Collector Self-Telemetry
+  #
+  # Controls logs generated by the collector itself.
+  # --------------------------------------------------------------------------
+  telemetry:
+
+    logs:
+      level: debug

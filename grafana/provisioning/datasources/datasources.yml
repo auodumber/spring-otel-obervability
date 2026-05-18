@@ -1,0 +1,70 @@
+# grafana/provisioning/datasources/datasources.yml
+# Automatically provisions all three observability backends in Grafana.
+# Correlations between signals (click trace → open logs; click log → open trace)
+# are enabled via the derivedFields and traceToLogs/traceToMetrics settings.
+
+apiVersion: 1
+
+datasources:
+
+  # --------------------------------------------------------------------------
+  # Prometheus — Metrics
+  # --------------------------------------------------------------------------
+  - name: Prometheus
+    type: prometheus
+    uid: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    jsonData:
+      httpMethod: POST
+      exemplarTraceIdDestinations:
+        - name: trace_id
+          datasourceUid: tempo
+
+  # --------------------------------------------------------------------------
+  # Grafana Tempo — Distributed Traces
+  # --------------------------------------------------------------------------
+  - name: Tempo
+    type: tempo
+    uid: tempo
+    access: proxy
+    url: http://tempo:3200
+    jsonData:
+      httpMethod: GET
+      serviceMap:
+        datasourceUid: prometheus     # enables Tempo service map from span-metrics
+      nodeGraph:
+        enabled: true
+      lokiSearch:
+        datasourceUid: loki           # "Find logs for this span" button in trace view
+      traceToLogs:
+        datasourceUid: loki
+        filterByTraceID: true
+        filterBySpanID: false
+        customQuery: true
+        query: '{service_name="${__span.tags["service.name"]}"} | trace_id = "${__trace.traceId}"'
+      traceToMetrics:
+        datasourceUid: prometheus
+        queries:
+          - name: "Request Rate"
+            query: 'rate(http_server_requests_seconds_count{service_name="${__span.tags["service.name"]}"}[5m])'
+          - name: "Error Rate"
+            query: 'rate(http_server_requests_seconds_count{service_name="${__span.tags["service.name"]}",http_response_status_code=~"5.."}[5m])'
+
+  # --------------------------------------------------------------------------
+  # Grafana Loki — Logs
+  # --------------------------------------------------------------------------
+  - name: Loki
+    type: loki
+    uid: loki
+    access: proxy
+    url: http://loki:3100
+    jsonData:
+      derivedFields:
+        # Parse traceId from log line → clickable link to Tempo
+        - matcherRegex: "traceId=(\\w+)"
+          name: traceId
+          url: "$${__value.raw}"
+          datasourceUid: tempo
+          urlDisplayLabel: "View trace in Tempo"

@@ -1,0 +1,165 @@
+# ============================================================================
+#  order-service — application configuration
+#  Spring Boot 4.0.6 + spring-boot-starter-opentelemetry
+# ============================================================================
+#
+#  Signal routing (all three pillars via OTLP → OTel Collector → backends):
+#
+#    Metrics  → management.otlp.metrics.export.url  → Prometheus / Mimir
+#    Traces   → opentelemetry.tracing.export.otlp.endpoint → Grafana Tempo
+#    Logs     → logging.export.otlp.endpoint         → Grafana Loki
+#                                                       (+ console via Logback)
+# ============================================================================
+
+spring:
+  application:
+    name: order-service
+
+  # ---- Persistence (H2 in-memory for demo) --------------------------------
+  datasource:
+    url: jdbc:h2:mem:orderdb;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+  h2:
+    console:
+      enabled: true      # http://localhost:8080/h2-console  (disable in prod)
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    show-sql: false       # flip to true only when debugging queries locally
+    properties:
+      hibernate:
+        format_sql: true
+        dialect: org.hibernate.dialect.H2Dialect
+
+# ============================================================================
+#  OPENTELEMETRY — resource attributes
+#  These are attached to every span, metric data point, and log record.
+#  In Kubernetes, replace with downward-API env vars via envFrom.
+# ============================================================================
+management:
+  # ============================================================================
+  #  TRACES — OTLP exporter endpoint for the Micrometer Tracing OTel bridge
+  # ============================================================================
+  opentelemetry:
+    resource-attributes:
+      service.name: ${spring.application.name}
+      service.version: ${APP_VERSION:1.0.0}
+      deployment.environment: ${APP_ENV:local}
+      host.name: ${HOSTNAME:localhost}
+      service.namespace: ecommerce
+    tracing:
+      export:
+        otlp:
+          endpoint: ${OTEL_TRACES_URL:http://localhost:4318/v1/traces}
+
+    # ============================================================================
+    #  LOGS — OTLP log export (Spring Boot 4.0.1+ built-in, no Actuator needed)
+    #  Also see logback-spring.xml where OpenTelemetryAppender forwards Logback
+    #  events into the OTel Log SDK for the same export pipeline.
+    # ============================================================================
+    logging:
+      export:
+        otlp:
+          endpoint: ${OTEL_LOGS_URL:http://localhost:4318/v1/logs}
+    level:
+      root: INFO
+      com.example.orderservice: DEBUG
+      org.springframework.web: INFO
+      # Set to DEBUG during query tuning; never in production
+      org.hibernate.SQL: WARN
+    pattern:
+      # Include trace_id + span_id (injected by Micrometer Tracing into MDC)
+      # so console logs correlate with Tempo traces during local development.
+      console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level [%X{traceId:-},%X{spanId:-}, %X{customer_id:-}] %logger{36} - %msg%n"
+  # --------------------------------------------------------------------------
+  #  TRACING — 100% sampling for dev; reduce to 0.1 (10%) for high-traffic prod
+  # --------------------------------------------------------------------------
+  tracing:
+    sampling:
+      probability: ${TRACING_SAMPLE_RATE:1.0}
+  # --------------------------------------------------------------------------
+  #  METRICS — push Micrometer metrics over OTLP (HTTP/Protobuf) to OTel Collector
+  #  Port 4318 = OTLP/HTTP   |   4317 = OTLP/gRPC
+  # --------------------------------------------------------------------------
+  otlp:
+    metrics:
+      export:
+        url: ${OTEL_METRICS_URL:http://localhost:4318/v1/metrics}
+        step: 30s          # scrape/push interval — match Prometheus scrape_interval
+  # --------------------------------------------------------------------------
+  #  Actuator endpoints
+  # --------------------------------------------------------------------------
+  endpoints:
+    web:
+      exposure:
+        include: health, info, metrics, prometheus, loggers, threaddump, env
+  endpoint:
+    health:
+      show-details: always
+      show-components: always
+    loggers:
+      enabled: true
+  info:
+    env:
+      enabled: true
+    java:
+      enabled: true
+    build:
+      enabled: true
+
+
+
+
+
+
+
+
+
+# ============================================================================
+#  APPLICATION-SPECIFIC
+# ============================================================================
+app:
+  metrics:
+    gauge-refresh-ms: 30000   # How often ObservabilityConfig refreshes order gauges
+
+info:
+  app:
+    name:        "@project.name@"
+    version:     "@project.version@"
+    description: "@project.description@"
+
+
+# ============================================================================
+#  PRODUCTION PROFILE OVERRIDES
+#  Activate with: --spring.profiles.active=production
+#  or: SPRING_PROFILES_ACTIVE=production
+# ============================================================================
+---
+spring:
+  config:
+    activate:
+      on-profile: production
+
+  datasource:
+    # Inject via Kubernetes Secret / Vault in real deployments
+    url:      ${DB_URL}
+    username: ${DB_USERNAME}
+    password: ${DB_PASSWORD}
+  jpa:
+    hibernate:
+      ddl-auto: validate       # Never auto-create schema in production
+  h2:
+    console:
+      enabled: false
+
+management:
+  tracing:
+    sampling:
+      probability: ${TRACING_SAMPLE_RATE:0.1}   # 10% in production
+
+logging:
+  level:
+    root: DBUG
+    com.example.orderservice: INFO
