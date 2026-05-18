@@ -9,55 +9,56 @@ and the Grafana LGTM observability stack.
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────────────────┐
-│                       order-service  :8080                               │
-│                                                                          │
-│  REST Layer           Service Layer            Observability             │
-│  ─────────────        ────────────────         ──────────────            │
-│  OrderController ──►  OrderService             @Observed (AOP)           │
-│    @Observed            @Observed                → child spans           │
-│                         MDC.put(orderId)         → Micrometer timers     │
-│                         Counter.increment()      → structured MDC logs   │
-│                         Timer.record()                                   │
-└────────────────────────────────────────────┬─────────────────────────────┘
-                                             │ OTLP/HTTP  :4318
-                                             │ (metrics + traces + logs)
-                                             ▼
-                    ┌─────────────────────────────────────────┐
-                    │           OTel Collector                │
-                    │                                         │
-                    │  Receive   :4317  OTLP/gRPC             │
-                    │            :4318  OTLP/HTTP             │
-                    │                                         │
-                    │  Process   batch · filter · resource    │
-                    │                                         │
-                    │  Expose    :9464  Prometheus scrape     │
-                    │            :8888  Collector self-metrics│
-                    │            :13133 Health check          │
-                    └──────────┬──────────┬───────────────────┘
-                               │          │               │
-          ┌────────────────────┘          │               └────────────────┐
-          │ OTLP/gRPC :9464               │ :/4317                         | Loki push :3100/oltp                     │
-          ▼                               ▼                                ▼       
-┌───────────────────────┐   ┌──────────────────────────┐   ┌─────────────────────┐
-│      Prometheus       │   │      Grafana Tempo       │   │    Grafana Loki     │
-│                       │   │                          │   │                     │
-│  :9090  Web UI / API  │   │  :3200  HTTP API         │   │  :3100  HTTP API    │
-│                       │   │  :4317  OTLP/gRPC recv   │   │  :9096  gRPC        │
-│  scrapes:             │   │         (internal)       │   │         (internal)  │
-│    otel-coll :9464    │   │                          │   │                     │
-│    otel-coll :8888    │   └─────────────┬────────────┘   └──────────┬──────────┘
-│    order-svc :8080    │                 │                           │
-└──────────┬────────────┘                 │                           │
-           └──────────────────────────────▼───────────────────────────┘
-                                 ┌──────────────────┐
-                                 │    Grafana UI    │
-                                 │    :3000         │
-                                 │                  │
-                                 │  Tempo   (traces)│  span  → logs :3200
-                                 │  Loki    (logs)  │  log   → trace :3100
-                                 │  Prometheus      │  metric→ trace :9090
-                                 └──────────────────┘
+                                                                                                  
+┌──────────────────────────────────────────────────────────────────────────┐                      
+│                       order-service  :8080                               │                      
+│                                                                          │                      
+│  REST Layer           Service Layer            Observability             │                      
+│  ─────────────        ────────────────         ──────────────            │                      
+│  OrderController ──►  OrderService             @Observed (AOP)           │                      
+│    @Observed            @Observed                → child spans           │                      
+│                         MDC.put(orderId)         → Micrometer timers     │                      
+│                         Counter.increment()      → structured MDC logs   │                      
+│                         Timer.record()                                   │                      
+└────────────────────────────────────────────┬─────────────────────────────┘                      
+                                             │ OTLP/HTTP  :4318                                   
+                                             │ (metrics + traces + logs)                          
+                                             ▼                                                    
+                    ┌─────────────────────────────────────────┐                                   
+                    │           OTel Collector                │                                   
+                    │                                         │                                   
+                    │  Receive   :4317  OTLP/gRPC             │                                   
+                    │            :4318  OTLP/HTTP             │                                   
+                    │                                         │                                   
+                    │  Process   batch · filter · resource    │                                   
+                    │                                         │                                   
+                    │  Expose    :9464  Prometheus scrape     │                                   
+                    │            :8888  Collector self-metrics│                                   
+                    │            :13133 Health check          │                                   
+                    └──────────┬──────────┬───────────────────┘                                   
+                               │          │               │                                       
+          ┌────────────────────┘          │               └────────────────┐                      
+          │ OTLP/gRPC :9464               │ :/4317                         | Loki push :3100/oltp 
+          ▼                               ▼                                ▼                      
+┌───────────────────────┐   ┌──────────────────────────┐   ┌─────────────────────┐                
+│      Prometheus       │   │      Grafana Tempo       │   │    Grafana Loki     │                
+│                       │   │                          │   │                     │                
+│  :9090  Web UI / API  │   │  :3200  HTTP API         │   │  :3100  HTTP API    │                
+│                       │   │  :4317  OTLP/gRPC recv   │   │  :9096  gRPC        │                
+│  scrapes:             │   │         (internal)       │   │         (internal)  │                
+│    otel-coll :9464    │   │                          │   │                     │                
+│    otel-coll :8888    │   └─────────────┬────────────┘   └──────────┬──────────┘                
+│    order-svc :8080    │                 │                           │                           
+└──────────┬────────────┘                 │                           │                           
+           └──────────────────────────────▼───────────────────────────┘                           
+                                 ┌──────────────────┐                                             
+                                 │    Grafana UI    │                                             
+                                 │    :3000         │                                             
+                                 │                  │                                             
+                                 │  Tempo   (traces)│  span  → logs :3200                         
+                                 │  Loki    (logs)  │  log   → trace :3100                        
+                                 │  Prometheus      │  metric→ trace :9090                        
+                                 └──────────────────┘                                             
 ```
 
 ---
